@@ -147,6 +147,9 @@ def main(argv: list[str] | None = None) -> int:
             raise
         log.error("%s", e)
         return 1
+    except KeyboardInterrupt:
+        print(file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":

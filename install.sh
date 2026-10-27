@@ -104,17 +104,21 @@ for var in VITADOCK_CONSUMER_KEY VITADOCK_CONSUMER_SECRET; do
     if [ -z "$(get_var "$var")" ]; then
         val="${!var:-}"
         [ -n "$val" ] || val=$(ask "$var" "$var (zie README)")
+        # The values are alphanumeric. Drop terminal escape codes (focus
+        # events, bracketed paste) and whitespace that a paste can carry.
+        val=$(printf '%s' "$val" | sed 's/\x1b\[[0-9;?]*[A-Za-z~]//g' | tr -cd 'A-Za-z0-9')
         [ -n "$val" ] || die "$var is verplicht"
+        echo "  $var: ${#val} tekens ontvangen (verwacht: 64)" >&2
         set_var "$var" "$val"
     fi
 done
-if ! (set -a; . "$ENV_FILE"; "$VENV/bin/python" -c \
-        'from vitadock_garmin_sync.vitadock import VitaDockClient; VitaDockClient()._request_token()' \
-        >/dev/null 2>&1); then
+if ! check=$(set -a; . "$ENV_FILE"; "$VENV/bin/python" -c \
+        'from vitadock_garmin_sync.vitadock import VitaDockClient; VitaDockClient()._request_token()' 2>&1); then
     # Clear them so the next run asks again.
     set_var VITADOCK_CONSUMER_KEY ""
     set_var VITADOCK_CONSUMER_SECRET ""
-    die "VitaDock weigert de consumer key/secret (zie README hoe je ze vindt). Draai de installer opnieuw."
+    die "VitaDock weigert de consumer key/secret: $(printf '%s' "$check" | tail -n1)
+Draai de installer opnieuw (zie README hoe je ze vindt)."
 fi
 
 say "Hulpcommando /usr/local/bin/vitadock-garmin-sync"
