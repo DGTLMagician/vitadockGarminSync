@@ -62,11 +62,13 @@ deze repository. Haal ze zelf uit de app:
 ```bash
 adb shell pm path de.medisana.vitadockplus        # pad naar base.apk
 adb pull <pad>/base.apk && unzip -o base.apk assets/bin/Data/Managed/Metadata/global-metadata.dat
-grep -aoE "[A-Za-z0-9]{64}" assets/bin/Data/Managed/Metadata/global-metadata.dat | sort -u
+grep -aoE "(sodoNy|vpSTut)[A-Za-z0-9]{58}" assets/bin/Data/Managed/Metadata/global-metadata.dat
 ```
 
-Eén van de 64-tekenstrings is de key en één de secret. Het juiste paar geeft HTTP 200 op
-`POST https://cloud.vitadock.com/auth/unauthorizedaccesses`.
+Dat geeft twee strings van 64 tekens: die met `sodoNy` is `VITADOCK_CONSUMER_KEY`, die met
+`vpSTut` is `VITADOCK_CONSUMER_SECRET`. (Gemeten in VitaDock+ 2.9.42; een nieuwere app-versie kan
+andere waarden hebben. Het juiste paar geeft HTTP 200 op
+`POST https://cloud.vitadock.com/auth/unauthorizedaccesses`.)
 
 ## Configuratie
 

@@ -108,6 +108,14 @@ for var in VITADOCK_CONSUMER_KEY VITADOCK_CONSUMER_SECRET; do
         set_var "$var" "$val"
     fi
 done
+if ! (set -a; . "$ENV_FILE"; "$VENV/bin/python" -c \
+        'from vitadock_garmin_sync.vitadock import VitaDockClient; VitaDockClient()._request_token()' \
+        >/dev/null 2>&1); then
+    # Clear them so the next run asks again.
+    set_var VITADOCK_CONSUMER_KEY ""
+    set_var VITADOCK_CONSUMER_SECRET ""
+    die "VitaDock weigert de consumer key/secret (zie README hoe je ze vindt). Draai de installer opnieuw."
+fi
 
 say "Hulpcommando /usr/local/bin/vitadock-garmin-sync"
 cat >/usr/local/bin/vitadock-garmin-sync <<EOF

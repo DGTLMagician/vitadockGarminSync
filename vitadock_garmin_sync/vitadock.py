@@ -17,6 +17,7 @@ import base64
 import hashlib
 import hmac
 import html
+import json
 import logging
 import os
 import re
@@ -24,6 +25,7 @@ import secrets
 import time
 import urllib.parse
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -43,6 +45,7 @@ MODULE_THERMODOCK = "thermodocks"
 MODULE_GLUCODOCK = "glucodockglucoses"
 
 CALLBACK_SCHEME = "vitadock2://"
+CALLBACK_URL = "vitadock2://callback"
 PAGE_SIZE = 100
 
 
@@ -84,6 +87,7 @@ def oauth_header(
     token: str | None = None,
     token_secret: str = "",
     verifier: str | None = None,
+    callback: str | None = None,
     query: dict[str, str] | None = None,
     nonce: str | None = None,
     timestamp: str | None = None,
@@ -101,6 +105,8 @@ def oauth_header(
         params["oauth_token"] = token
     if verifier:
         params["oauth_verifier"] = verifier
+    if callback:
+        params["oauth_callback"] = callback
 
     signed = dict(params)
     signed.update(query or {})
@@ -130,7 +136,8 @@ class VitaDockClient:
 
     def _request_token(self) -> tuple[str, str]:
         url = f"{self.base}/auth/unauthorizedaccesses"
-        r = self.http.post(url, headers={"Authorization": oauth_header("POST", url)}, timeout=30)
+        auth = oauth_header("POST", url, callback=CALLBACK_URL)
+        r = self.http.post(url, headers={"Authorization": auth}, timeout=30)
         if r.status_code != 200:
             raise AuthError(f"request token failed: HTTP {r.status_code} {r.text[:200]}"
                             "(check VITADOCK_CONSUMER_KEY/VITADOCK_CONSUMER_SECRET)")
@@ -144,6 +151,7 @@ class VitaDockClient:
         which is where the app's web view picks it up; here the redirect chain
         is followed by hand so that the custom-scheme Location can be read.
         """
+        self._hops: list[requests.Response] = []
         url = f"{self.base}/portalv2/desiredaccessrights/request?oauth_token={_q(request_token)}"
         r = self._follow(self.http.get(url, allow_redirects=False, timeout=30))
         if (v := self._verifier(r)) is not None:
@@ -154,11 +162,10 @@ class VitaDockClient:
             raise AuthError("login form not found on VitaDock portal")
         action, fields = form
         fields.update({"j_username": email, "j_password": password})
-        r = self.http.post(urllib.parse.urljoin(r.url, action), data=fields,
-                           allow_redirects=False, timeout=30)
-        r = self._follow(r)
+        r = self._follow(self.http.post(urllib.parse.urljoin(r.url, action), data=fields,
+                                        allow_redirects=False, timeout=30))
 
-        # Some accounts get a consent page ("desired access rights") first.
+        # Then the consent page ("desired access rights"); approve it.
         for _ in range(3):
             if (v := self._verifier(r)) is not None:
                 return v
@@ -170,27 +177,46 @@ class VitaDockClient:
             action, fields = form
             r = self._follow(self.http.post(urllib.parse.urljoin(r.url, action), data=fields,
                                             allow_redirects=False, timeout=30))
-        raise AuthError(f"no OAuth verifier received from portal (ended at {r.url})")
+        if (v := self._verifier(r)) is not None:
+            return v
+        hint = f"; portal pages saved in {self._dump()}" if os.environ.get("VDGS_DEBUG_DIR") else \
+            "; rerun with VDGS_DEBUG_DIR=<dir> to save the portal pages"
+        raise AuthError(f"no OAuth verifier received from portal (ended at {r.url}){hint}")
 
     def _follow(self, r: requests.Response) -> requests.Response:
         for _ in range(10):
+            self._hops.append(r)
             loc = r.headers.get("Location")
             if not r.is_redirect or not loc or loc.startswith(CALLBACK_SCHEME):
                 return r
             r = self.http.get(urllib.parse.urljoin(r.url, loc), allow_redirects=False, timeout=30)
         raise AuthError("too many redirects on VitaDock portal")
 
-    @staticmethod
-    def _verifier(r: requests.Response) -> str | None:
-        candidates = [r.headers.get("Location", "")]
-        candidates += re.findall(r"vitadock2://[^\"'\s<>]+", r.text)
-        for loc in candidates:
-            if loc.startswith(CALLBACK_SCHEME):
-                query = urllib.parse.urlsplit(html.unescape(loc)).query
-                v = urllib.parse.parse_qs(query).get("oauth_verifier")
-                if v:
-                    return v[0]
+    def _verifier(self, r: requests.Response) -> str | None:
+        """Find ``oauth_verifier`` in any redirect, URL, cookie or page seen so far."""
+        for hop in [*getattr(self, "_hops", []), r]:
+            texts = [hop.headers.get("Location", ""), hop.url or "", hop.text]
+            texts += [c.value or "" for c in hop.cookies]
+            for text in texts:
+                m = re.search(r"oauth_verifier(?:=|&#61;|\"\s*:\s*\"|\"?\s+value=\")([A-Za-z0-9_\-.%]+)",
+                              html.unescape(text))
+                if m:
+                    return urllib.parse.unquote(m.group(1))
         return None
+
+    def _dump(self) -> str:
+        """Save the portal responses for debugging (no password: that is only sent, never echoed)."""
+        out = Path(os.environ["VDGS_DEBUG_DIR"]).expanduser()
+        out.mkdir(parents=True, exist_ok=True, mode=0o700)
+        for i, hop in enumerate(self._hops):
+            meta = {"method": hop.request.method, "url": hop.url, "status": hop.status_code,
+                    "location": hop.headers.get("Location"),
+                    "cookies": sorted(c.name for c in hop.cookies),
+                    "request_fields": sorted(urllib.parse.parse_qs(hop.request.body or "").keys())
+                    if isinstance(hop.request.body, str) else None}
+            (out / f"{i:02d}.json").write_text(json.dumps(meta, indent=1))
+            (out / f"{i:02d}.html").write_text(hop.text)
+        return str(out)
 
     def _access_token(self, token: str, secret: str, verifier: str) -> AccessToken:
         url = f"{self.base}/auth/accesses/verify"
@@ -232,18 +258,39 @@ class VitaDockClient:
 
 
 def _parse_form(page: str, form_id: str | None = None) -> tuple[str, dict[str, str]] | None:
+    """Return (action, fields) of a form, including the submit button a user would click.
+
+    Consent forms often only record approval via the clicked button's name/value,
+    so pick the approving button when there are several.
+    """
     for m in re.finditer(r"<form\b([^>]*)>(.*?)</form>", page, re.S | re.I):
         attrs, body = m.group(1), m.group(2)
         if form_id and not re.search(rf'\bid="{form_id}"', attrs):
             continue
         action = re.search(r'\baction="([^"]*)"', attrs)
-        fields = {}
-        for inp in re.finditer(r"<input\b[^>]*>", body, re.I):
-            tag = inp.group(0)
-            name = re.search(r'\bname="([^"]*)"', tag)
-            if not name or re.search(r'type="(submit|button)"', tag):
+        fields: dict[str, str] = {}
+        submits: list[tuple[str, str, str]] = []
+        for tag in re.finditer(r"<input\b[^>]*>|<button\b[^>]*>.*?</button>", body, re.I | re.S):
+            t = tag.group(0)
+            name = re.search(r'\bname="([^"]*)"', t)
+            value = re.search(r'\bvalue="([^"]*)"', t)
+            val = html.unescape(value.group(1)) if value else ""
+            is_submit = t.lower().startswith("<button") and not re.search(r'type="(button|reset)"', t, re.I) \
+                or re.search(r'type="(submit|image)"', t, re.I)
+            if is_submit:
+                if name:
+                    label = re.sub(r"<[^>]+>", " ", t) + " " + val
+                    submits.append((name.group(1), val, label.lower()))
                 continue
-            value = re.search(r'\bvalue="([^"]*)"', tag)
-            fields[name.group(1)] = html.unescape(value.group(1)) if value else ""
+            if not name or re.search(r'type="(checkbox|radio)"', t, re.I) and "checked" not in t.lower():
+                continue
+            fields[name.group(1)] = val
+        if submits:
+            approve = re.compile(r"accept|allow|approv|authori|grant|confirm|agree|zustimm|erlaub|akzept|"
+                                 r"bestätig|toestaan|akkoord|\bok\b|\byes\b|\btrue\b|\bja\b")
+            deny = re.compile(r"deny|reject|cancel|declin|ablehn|abbrech|weiger|annuleer|\bno\b|\bfalse\b")
+            best = next((s for s in submits if approve.search(s[2]) and not deny.search(s[2])),
+                        next((s for s in submits if not deny.search(s[2])), submits[0]))
+            fields[best[0]] = best[1]
         return html.unescape(action.group(1)) if action else "", fields
     return None

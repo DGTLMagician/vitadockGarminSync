@@ -52,12 +52,46 @@ def test_parse_login_form():
     assert fields == {"j_username": "", "j_password": "", "oauth_token": "TOKEN", "_csrf": "abc"}
 
 
-def test_verifier_from_callback_redirect():
+def response(location=None, body=""):
     r = requests.Response()
-    r.status_code = 302
-    r.headers["Location"] = "vitadock2://callback?oauth_token=T&oauth_verifier=V123"
-    r._content = b""
-    assert VitaDockClient._verifier(r) == "V123"
+    r.status_code = 302 if location else 200
+    if location:
+        r.headers["Location"] = location
+    r._content = body.encode()
+    r.url = "https://cloud.vitadock.com/portalv2/permission/thanks"
+    return r
+
+
+def test_verifier_from_callback_redirect():
+    r = response("vitadock2://callback?oauth_token=T&oauth_verifier=V123")
+    assert VitaDockClient()._verifier(r) == "V123"
+
+
+def test_verifier_from_page_or_earlier_hop():
+    c = VitaDockClient()
+    assert c._verifier(response(body='<input type="hidden" name="oauth_verifier" value="abc-9"/>')) == "abc-9"
+    page = '<p>Code: <input name="x" value="1"></p><a href="vitadock2://callback/?oauth_token=T&amp;oauth_verifier=Q7">'
+    assert c._verifier(response(body=page)) == "Q7"
+    c._hops = [response("/portalv2/permission/thanks?oauth_verifier=HOP1")]
+    assert c._verifier(response(body="<h1>Thanks</h1>")) == "HOP1"
+
+
+def test_consent_form_picks_approve_button():
+    page = '''<form action="/portalv2/desiredaccessrights/grant" method="POST">
+    <input type="hidden" name="oauth_token" value="T"/>
+    <input type="checkbox" name="share" value="on" checked/>
+    <input type="checkbox" name="newsletter" value="on"/>
+    <button type="submit" name="decision" value="deny">Deny</button>
+    <button type="submit" name="decision" value="allow">Allow access</button></form>'''
+    action, fields = _parse_form(page)
+    assert action == "/portalv2/desiredaccessrights/grant"
+    assert fields == {"oauth_token": "T", "share": "on", "decision": "allow"}
+
+
+def test_consent_form_with_submit_inputs():
+    page = '''<form action="/grant"><input type="submit" name="cancel" value="Abbrechen"/>
+    <input type="submit" name="accept" value="Zustimmen"/></form>'''
+    assert _parse_form(page)[1] == {"accept": "Zustimmen"}
 
 
 def test_measured_at_utc_vs_wallclock():
