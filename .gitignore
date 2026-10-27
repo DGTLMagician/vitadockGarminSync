@@ -1,0 +1,25 @@
+# Python
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# Secrets and personal data: never commit these
+.env
+*.env
+!deploy/*.env.example
+state/
+state.json
+garmin/
+garmin_tokens.json
+*.token
+
+# Reverse-engineering artefacts (copyrighted app content)
+*.apk
+*.apks
+*.xapk
+global-metadata.dat
+libil2cpp.so
+dump*.cs

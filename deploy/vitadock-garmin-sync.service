@@ -1,0 +1,30 @@
+[Unit]
+Description=Sync VitaDock+ measurements to Garmin Connect
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=vitadock-sync
+EnvironmentFile=/etc/vitadock-garmin-sync.env
+ExecStart=/opt/vitadock-garmin-sync/.venv/bin/vitadock-garmin-sync sync
+Environment=HOME=/var/lib/vitadock-garmin-sync
+StateDirectory=vitadock-garmin-sync
+StateDirectoryMode=0700
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+# AF_UNIX for name resolution through systemd-resolved/nscd.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+UMask=0077
