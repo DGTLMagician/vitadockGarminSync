@@ -47,8 +47,8 @@ def test_parse_login_form():
     <input id="proceed" value="Log in" type="submit"/>
     <input value="TOKEN" name="oauth_token" type="hidden"/>
     <input type="hidden" name="_csrf" value="abc" /></form>'''
-    action, fields = _parse_form(page, form_id="User")
-    assert action == "/portalv2/j_spring_security_check"
+    action, fields, method = _parse_form(page, form_id="User")
+    assert action == "/portalv2/j_spring_security_check" and method == "post"
     assert fields == {"j_username": "", "j_password": "", "oauth_token": "TOKEN", "_csrf": "abc"}
 
 
@@ -83,7 +83,7 @@ def test_consent_form_picks_approve_button():
     <input type="checkbox" name="newsletter" value="on"/>
     <button type="submit" name="decision" value="deny">Deny</button>
     <button type="submit" name="decision" value="allow">Allow access</button></form>'''
-    action, fields = _parse_form(page)
+    action, fields, method = _parse_form(page)
     assert action == "/portalv2/desiredaccessrights/grant"
     assert fields == {"oauth_token": "T", "share": "on", "decision": "allow"}
 
@@ -153,3 +153,14 @@ def test_initial_since_filters_old_records(tmp_path):
     s = Syncer(FakeVitaDock(data), garmin, State(tmp_path / "s.json"),
                initial_since=datetime(2024, 1, 1, tzinfo=timezone.utc), modules=("targetscales",))
     assert s.run() == 0
+
+
+def test_vitadock_consent_form_is_get():
+    # Shape of the real consent page (portalv2/desiredaccessrights/request).
+    page = '''<form id="command" action="/portalv2/permission/thanks" method="get">
+    <input type="submit" id="proceed" value="Allow" tabindex="99"/><p class="text-center"><br/>
+    <a class="nakedbutton" href="/portalv2/permission/deny?oauth_token=T">Don't Allow</a></p>
+    <input value="T" name="oauth_token" type="hidden" id="oauth_token"/>
+    <input value="" name="code" type="hidden" id="code"/></form>'''
+    form = _parse_form(page)
+    assert form == ("/portalv2/permission/thanks", {"oauth_token": "T", "code": ""}, "get")

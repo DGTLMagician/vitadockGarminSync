@@ -26,7 +26,7 @@ import time
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import requests
 
@@ -160,12 +160,11 @@ class VitaDockClient:
         form = _parse_form(r.text, form_id="User")
         if form is None:
             raise AuthError("login form not found on VitaDock portal")
-        action, fields = form
-        fields.update({"j_username": email, "j_password": password})
-        r = self._follow(self.http.post(urllib.parse.urljoin(r.url, action), data=fields,
-                                        allow_redirects=False, timeout=30))
+        form.fields.update({"j_username": email, "j_password": password})
+        r = self._submit(r, form)
 
-        # Then the consent page ("desired access rights"); approve it.
+        # Then the consent page ("desired access rights"); approve it. It is a
+        # GET form to /portalv2/permission/thanks; posting it gives HTTP 403.
         for _ in range(3):
             if (v := self._verifier(r)) is not None:
                 return v
@@ -174,14 +173,20 @@ class VitaDockClient:
             form = _parse_form(r.text)
             if form is None:
                 break
-            action, fields = form
-            r = self._follow(self.http.post(urllib.parse.urljoin(r.url, action), data=fields,
-                                            allow_redirects=False, timeout=30))
+            r = self._submit(r, form)
         if (v := self._verifier(r)) is not None:
             return v
         hint = f"; portal pages saved in {self._dump()}" if os.environ.get("VDGS_DEBUG_DIR") else \
             "; rerun with VDGS_DEBUG_DIR=<dir> to save the portal pages"
         raise AuthError(f"no OAuth verifier received from portal (ended at {r.url}){hint}")
+
+    def _submit(self, page: requests.Response, form: Form) -> requests.Response:
+        url = urllib.parse.urljoin(page.url, form.action)
+        if form.method == "get":
+            r = self.http.get(url, params=form.fields, allow_redirects=False, timeout=30)
+        else:
+            r = self.http.post(url, data=form.fields, allow_redirects=False, timeout=30)
+        return self._follow(r)
 
     def _follow(self, r: requests.Response) -> requests.Response:
         for _ in range(10):
@@ -257,8 +262,14 @@ class VitaDockClient:
             start += PAGE_SIZE
 
 
-def _parse_form(page: str, form_id: str | None = None) -> tuple[str, dict[str, str]] | None:
-    """Return (action, fields) of a form, including the submit button a user would click.
+class Form(NamedTuple):
+    action: str
+    fields: dict[str, str]
+    method: str  # "get" or "post"
+
+
+def _parse_form(page: str, form_id: str | None = None) -> Form | None:
+    """Return action, fields and method of a form, including the submit button a user would click.
 
     Consent forms often only record approval via the clicked button's name/value,
     so pick the approving button when there are several.
@@ -292,5 +303,7 @@ def _parse_form(page: str, form_id: str | None = None) -> tuple[str, dict[str, s
             best = next((s for s in submits if approve.search(s[2]) and not deny.search(s[2])),
                         next((s for s in submits if not deny.search(s[2])), submits[0]))
             fields[best[0]] = best[1]
-        return html.unescape(action.group(1)) if action else "", fields
+        method = re.search(r'\bmethod="([^"]*)"', attrs)
+        return Form(html.unescape(action.group(1)) if action else "", fields,
+                    method.group(1).lower() if method else "get")
     return None
