@@ -32,7 +32,7 @@ gewicht als FIT-bestand (`weight_scale` bericht), bloeddruk via de bloeddruk-API
 Eén regel op de Linux-host (systemd, Debian/Ubuntu/Fedora/Arch/Alpine/openSUSE):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/DGTLMagician/vitadockGarminSync/main/install.sh | sudo bash
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/DGTLMagician/vitadockGarminSync/main/install.sh)"
 ```
 
 Het script:

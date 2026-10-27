@@ -14,7 +14,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .sync import State, Syncer
-from .vitadock import AuthError, VitaDockClient
+from .vitadock import AuthError, VitaDockClient, VitaDockError
 
 log = logging.getLogger("vitadock_garmin_sync")
 
@@ -132,7 +132,13 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    return args.func(args)
+    try:
+        return args.func(args)
+    except VitaDockError as e:
+        if args.verbose:
+            raise
+        log.error("%s", e)
+        return 1
 
 
 if __name__ == "__main__":

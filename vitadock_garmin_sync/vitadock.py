@@ -132,7 +132,8 @@ class VitaDockClient:
         url = f"{self.base}/auth/unauthorizedaccesses"
         r = self.http.post(url, headers={"Authorization": oauth_header("POST", url)}, timeout=30)
         if r.status_code != 200:
-            raise AuthError(f"request token failed: HTTP {r.status_code} {r.text[:200]}")
+            raise AuthError(f"request token failed: HTTP {r.status_code} {r.text[:200]}"
+                            "(check VITADOCK_CONSUMER_KEY/VITADOCK_CONSUMER_SECRET)")
         data = urllib.parse.parse_qs(r.text)
         return data["oauth_token"][0], data["oauth_token_secret"][0]
 

@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Install or update vitadock-garmin-sync as a systemd timer on Linux.
 #
-#   curl -fsSL https://raw.githubusercontent.com/DGTLMagician/vitadockGarminSync/main/install.sh | sudo bash
+#   sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/DGTLMagician/vitadockGarminSync/main/install.sh)"
 #
 # Re-running it updates the code and keeps the existing configuration and tokens.
+# Not `curl ... | sudo bash`: then stdin is the pipe, and sudo (sudo-rs and
+# sudo with use_pty) cannot pass keyboard input on to the prompts below.
 set -euo pipefail
 
 REPO_URL="${REPO_URL:-https://github.com/DGTLMagician/vitadockGarminSync.git}"
@@ -21,15 +23,23 @@ die() { printf '\033[1;31mfout:\033[0m %s\n' "$*" >&2; exit 1; }
 [ "$(id -u)" -eq 0 ] || die "start als root (sudo)"
 command -v systemctl >/dev/null || die "systemd is vereist"
 
-# Prompts must come from the terminal: stdin is the script itself when piped.
-TTY=""
-if [ -r /dev/tty ] && (exec </dev/tty) 2>/dev/null; then TTY=/dev/tty; fi
-ask() { # ask VAR "prompt" [secret]
-    [ -n "$TTY" ] || die "$1 ontbreekt in $ENV_FILE en er is geen terminal om het te vragen"
+# Only prompt when stdin is a terminal; never fall back to /dev/tty, which
+# hangs under sudo's own pty when stdin is a pipe.
+INTERACTIVE=""
+[ -t 0 ] && INTERACTIVE=1
+ONELINER='sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/DGTLMagician/vitadockGarminSync/main/install.sh)"'
+ask() { # ask VAR "prompt"  (input hidden)
+    [ -n "$INTERACTIVE" ] || die "$1 ontbreekt in $ENV_FILE. Start de installer interactief met:
+  $ONELINER
+of geef de waarde mee: sudo $1=... bash install.sh"
     local v
-    if [ "${3:-}" = secret ]; then read -rsp "$2: " v <"$TTY"; echo >&2; else read -rp "$2: " v <"$TTY"; fi
+    read -rsp "$2: " v
+    echo >&2
     printf '%s' "$v"
 }
+
+# Keep pip/uv caches out of the invoking user's home (sudo may keep $HOME).
+export PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1 UV_CACHE_DIR="$PREFIX/.uv-cache"
 
 install_pkgs() {
     if command -v apt-get >/dev/null; then apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@"
@@ -93,7 +103,7 @@ get_var() { sed -n "s/^$1=//p" "$ENV_FILE" | tail -n1; }
 for var in VITADOCK_CONSUMER_KEY VITADOCK_CONSUMER_SECRET; do
     if [ -z "$(get_var "$var")" ]; then
         val="${!var:-}"
-        [ -n "$val" ] || val=$(ask "$var" "$var (zie README)" secret)
+        [ -n "$val" ] || val=$(ask "$var" "$var (zie README)")
         [ -n "$val" ] || die "$var is verplicht"
         set_var "$var" "$val"
     fi
@@ -117,9 +127,10 @@ install -m 644 "$SRC/deploy/vitadock-garmin-sync.service" "$SRC/deploy/vitadock-
 systemctl daemon-reload
 
 if [ ! -f "$STATE/state.json" ] || [ ! -e "$STATE/garmin" ]; then
-    if [ -n "$TTY" ]; then
+    if [ -n "$INTERACTIVE" ]; then
         say "Eenmalig inloggen bij VitaDock en Garmin (wachtwoorden worden niet opgeslagen)"
-        /usr/local/bin/vitadock-garmin-sync login <"$TTY"
+        /usr/local/bin/vitadock-garmin-sync login \
+            || echo "Inloggen mislukt. Probeer opnieuw met:  sudo vitadock-garmin-sync login"
     else
         echo "Log daarna eenmalig in met:  sudo vitadock-garmin-sync login"
     fi
