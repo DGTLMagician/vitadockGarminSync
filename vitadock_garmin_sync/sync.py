@@ -20,6 +20,14 @@ log = logging.getLogger(__name__)
 # measurements are still picked up; already-synced ids are skipped.
 OVERLAP = timedelta(days=2)
 
+# Scales whose clock was reset report dates around 2010-01-01.
+MIN_PLAUSIBLE = datetime(2011, 1, 1, tzinfo=timezone.utc)
+
+# A Garmin entry this close in time (Garmin truncates to the minute) with
+# the same values is taken to be the same measurement, e.g. from an earlier
+# import or another sync app.
+DUPLICATE_WINDOW = timedelta(minutes=2)
+
 
 def pick(record: dict[str, Any], *names: str) -> Any:
     """Case-insensitive field lookup; returns the first present, non-null value."""
@@ -128,28 +136,63 @@ class Syncer:
 
         done = set(self.state.synced.get(module, []))
         newest = start_ms
-        uploaded = 0
+        uploaded = implausible = duplicates = 0
+        todo = []
         for rec in sorted(records, key=lambda r: pick(r, "measurementDate") or 0):
-            rid = record_id(module, rec)
-            when = measured_at(rec, self.tz, self.wallclock)
-            if self.initial_since and when < self.initial_since:
-                continue
-            if rid in done or not is_active(rec):
-                continue
-            if self._upload(module, rec, when):
-                uploaded += 1
-            if not self.dry_run:
-                done.add(rid)
-                self.state.synced[module] = sorted(done)
-                self.state.save()
             changed = pick(rec, "updatedDate", "updated_date", "measurementDate")
             if isinstance(changed, (int, float)):
                 newest = max(newest, int(changed))
+            when = measured_at(rec, self.tz, self.wallclock)
+            if self.initial_since and when < self.initial_since:
+                continue
+            if record_id(module, rec) in done or not is_active(rec):
+                continue
+            if not MIN_PLAUSIBLE <= when <= datetime.now(timezone.utc) + timedelta(days=1):
+                implausible += 1
+                continue
+            todo.append((rec, when))
+        if implausible:
+            log.warning("%s: skipped %d record(s) with an implausible date (scale clock not set?)",
+                        module, implausible)
+
+        existing = self._existing(module, [w for _, w in todo])
+        for rec, when in todo:
+            if _matches(module, rec, when, existing):
+                duplicates += 1
+            elif self._upload(module, rec, when):
+                uploaded += 1
+            if not self.dry_run:
+                done.add(record_id(module, rec))
+                self.state.synced[module] = sorted(done)
+                self.state.save()
+        if duplicates:
+            log.info("%s: %d record(s) already in Garmin Connect, skipped", module, duplicates)
 
         if not self.dry_run:
             self.state.since[module] = max(0, newest - int(OVERLAP.total_seconds() * 1000))
             self.state.save()
         return uploaded
+
+    def _existing(self, module: str, times: list[datetime]) -> list[dict[str, Any]]:
+        """Garmin entries in the period covered by ``times``, one request per year."""
+        if not times or self.garmin is None:
+            if times and self.garmin is None:
+                log.warning("no Garmin login: cannot check for measurements already in Garmin")
+            return []
+        start, end = min(times).date(), max(times).date() + timedelta(days=1)
+        out: list[dict[str, Any]] = []
+        while start <= end:
+            chunk_end = min(end, start + timedelta(days=364))
+            if module == MODULE_TARGETSCALE:
+                data = self.garmin.get_weigh_ins(start.isoformat(), chunk_end.isoformat()) or {}
+                for day in data.get("dailyWeightSummaries") or []:
+                    out.extend(day.get("allWeightMetrics") or [])
+            elif module == MODULE_CARDIODOCK:
+                data = self.garmin.get_blood_pressure(start.isoformat(), chunk_end.isoformat()) or {}
+                for day in data.get("measurementSummaries") or []:
+                    out.extend(day.get("measurements") or [])
+            start = chunk_end + timedelta(days=1)
+        return out
 
     def _upload(self, module: str, rec: dict[str, Any], when: datetime) -> bool:
         if module == MODULE_TARGETSCALE:
@@ -190,6 +233,33 @@ class Syncer:
             self.garmin.set_blood_pressure(int(sys_), int(dia), int(pulse) if pulse else None,
                                            timestamp=when.isoformat(), notes="VitaDock")
         return True
+
+
+def _garmin_time(entry: dict[str, Any]) -> datetime | None:
+    ts = entry.get("timestampGMT") or entry.get("measurementTimestampGMT")
+    if isinstance(ts, (int, float)):
+        return datetime.fromtimestamp(ts / 1000, timezone.utc)
+    if isinstance(ts, str):
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    return None
+
+
+def _matches(module: str, rec: dict[str, Any], when: datetime, existing: list[dict[str, Any]]) -> bool:
+    """Whether Garmin already has this measurement (same time and values)."""
+    for e in existing:
+        t = _garmin_time(e)
+        if t is None or abs(t - when) > DUPLICATE_WINDOW:
+            continue
+        if module == MODULE_TARGETSCALE:
+            weight = positive(pick(rec, "bodyWeight", "weight"))
+            if weight and e.get("weight") and abs(e["weight"] / 1000 - weight) <= 0.15:
+                return True
+        elif module == MODULE_CARDIODOCK:
+            if e.get("systolic") == positive(pick(rec, "systole")) and \
+                    e.get("diastolic") == positive(pick(rec, "diastole")):
+                return True
+    return False
 
 
 def _pct_to_kg(muscle: float | None, weight: float) -> float | None:

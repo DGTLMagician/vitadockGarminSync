@@ -35,8 +35,7 @@ def garmin_client(interactive: bool):
 
     tokens = state_dir() / "garmin"
     email, password = env("GARMIN_EMAIL"), env("GARMIN_PASSWORD")
-    has_tokens = tokens.is_dir() and any(tokens.iterdir())
-    if interactive and not has_tokens:
+    if interactive and not has_garmin_tokens():
         email = email or input("Garmin e-mail: ")
         password = password or getpass.getpass("Garmin password: ")
     g = Garmin(email, password, prompt_mfa=(lambda: input("Garmin MFA code: ")) if interactive else None)
@@ -45,14 +44,20 @@ def garmin_client(interactive: bool):
     return g
 
 
+def has_garmin_tokens() -> bool:
+    tokens = state_dir() / "garmin"
+    return tokens.is_dir() and any(tokens.iterdir())
+
+
 def cmd_login(args) -> int:
-    state = State.load(state_dir() / "state.json")
-    email = env("VITADOCK_EMAIL") or input("VitaDock e-mail: ")
-    password = env("VITADOCK_PASSWORD") or getpass.getpass("VitaDock password: ")
-    access = VitaDockClient(env("VITADOCK_SERVER", "eu")).login(email, password)
-    state.access_token, state.access_secret = access.token, access.secret
-    state.save()
-    print("VitaDock: logged in, access token stored.")
+    if not args.garmin_only:
+        state = State.load(state_dir() / "state.json")
+        email = env("VITADOCK_EMAIL") or input("VitaDock e-mail: ")
+        password = env("VITADOCK_PASSWORD") or getpass.getpass("VitaDock password: ")
+        access = VitaDockClient(env("VITADOCK_SERVER", "eu")).login(email, password)
+        state.access_token, state.access_secret = access.token, access.secret
+        state.save()
+        print("VitaDock: logged in, access token stored.")
     if not args.vitadock_only:
         garmin_client(interactive=True)
         print("Garmin Connect: logged in, tokens stored.")
@@ -72,7 +77,8 @@ def make_syncer(dry_run: bool) -> Syncer:
     since = env("VDGS_SYNC_SINCE")
     return Syncer(
         vitadock=vd,
-        garmin=None if dry_run else garmin_client(interactive=sys.stdin.isatty()),
+        # A dry run still reads Garmin (to skip what is already there) when logged in.
+        garmin=None if dry_run and not has_garmin_tokens() else garmin_client(interactive=sys.stdin.isatty()),
         state=state,
         tz=tz,
         wallclock=env("VDGS_TIMESTAMPS", "utc") == "wallclock",
@@ -120,7 +126,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("-v", "--verbose", action="store_true")
     sub = p.add_subparsers(dest="cmd", required=True)
     lp = sub.add_parser("login", help="log in to VitaDock and Garmin and store tokens")
-    lp.add_argument("--vitadock-only", action="store_true")
+    only = lp.add_mutually_exclusive_group()
+    only.add_argument("--vitadock-only", action="store_true")
+    only.add_argument("--garmin-only", action="store_true")
     lp.set_defaults(func=cmd_login)
     sp = sub.add_parser("sync", help="sync once (for cron or a systemd timer)")
     sp.add_argument("-n", "--dry-run", action="store_true", help="show what would be uploaded")

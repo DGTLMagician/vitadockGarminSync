@@ -112,8 +112,15 @@ class FakeVitaDock:
 
 
 class FakeGarmin:
-    def __init__(self):
+    def __init__(self, existing_weights=()):
         self.weights, self.bp = [], []
+        self.existing_weights = list(existing_weights)
+
+    def get_weigh_ins(self, start, end):
+        return {"dailyWeightSummaries": [{"allWeightMetrics": self.existing_weights}]}
+
+    def get_blood_pressure(self, start, end):
+        return {"measurementSummaries": []}
 
     def add_body_composition(self, ts, weight, **kw):
         self.weights.append((ts, weight, kw))
@@ -164,3 +171,26 @@ def test_vitadock_consent_form_is_get():
     <input value="" name="code" type="hidden" id="code"/></form>'''
     form = _parse_form(page)
     assert form == ("/portalv2/permission/thanks", {"oauth_token": "T", "code": ""}, "get")
+
+
+def test_skips_measurements_already_in_garmin_and_bad_dates(tmp_path):
+    data = {"targetscales": [
+        # Garmin has this one, truncated to the minute (as seen in a real account).
+        {"id": "dup", "measurementDate": 1_792_824_966_000, "bodyWeight": 80.9},
+        {"id": "new", "measurementDate": 1_793_081_852_000, "bodyWeight": 83.0},
+        {"id": "clock", "measurementDate": 1_262_304_024_000, "bodyWeight": 90.0},  # 2010-01-01
+    ]}
+    garmin = FakeGarmin([{"timestampGMT": 1_792_824_960_000, "weight": 80900}])
+    state = State(tmp_path / "s.json")
+    s = Syncer(FakeVitaDock(data), garmin, state, modules=("targetscales",))
+    assert s.run() == 1
+    assert [w[1] for w in garmin.weights] == [83.0]
+    assert set(state.synced["targetscales"]) == {"targetscales:dup", "targetscales:new"}
+
+
+def test_dry_run_uploads_and_records_nothing(tmp_path):
+    data = {"targetscales": [{"id": "a", "measurementDate": 1_793_081_852_000, "bodyWeight": 83.0}]}
+    garmin = FakeGarmin()
+    state = State(tmp_path / "s.json")
+    assert Syncer(FakeVitaDock(data), garmin, state, dry_run=True, modules=("targetscales",)).run() == 1
+    assert garmin.weights == [] and state.synced == {} and not (tmp_path / "s.json").exists()
